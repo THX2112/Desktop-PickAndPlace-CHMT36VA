@@ -18,8 +18,8 @@ string    feederListUrl       = "https://docs.google.com/spreadsheet/ccc?output=
 string    feederCSV           = "feeders.csv";
 int       autodetectColumns   = 1;
 int       flipHorizontal      = 1;
-int       useAutomaticOffset  = 1;
 string 	  defaultFileLocation = "";
+int       useAutomaticOffset  = 1;
 
 string pnpName[];
 string pnpDesignator[];
@@ -36,7 +36,15 @@ int    pnpStatsPartsDnp;
 int    pnpStatsPartsError;
 string pnpBasefile;
 
-string  usedFeederList[]; //Keeps track of the components in the feeders
+int componentCount[];	//	Contains number of times each component is used.
+
+//	Simple trays implementation. 
+//	Need to add trays.txt file to ULP directory. This file is just a copy of the tray information from a .dpv file that has the proper tray data already entered.
+//	Tray feeders also need to be added to "feeders.csv".
+//	WARNING: If the tray information is not added correctly, the pick-head could crash (very loudly) into a pillar. 
+string trayFile= "trays.txt";
+int simpleTray = 1;		//	Use tray feature or not. 
+
 string  availableFeederList[];
 string  availableFeederHeadline;
 int     numberOfFeeders;
@@ -68,9 +76,10 @@ int COL_PLACE     = 13;     string NAME_PLACE       = "Place Component"    ; str
 int COL_CHECK_VAC = 14;     string NAME_CHECK_VAC   = "Check Vacuum"       ; string DEFAULT_CHECK_VAC   = "Y";
 int COL_USE_VISION= 15;     string NAME_USE_VISION  = "Use Vision"         ; string DEFAULT_USE_VISION  = "Y"; 
 
-int MAX_FEEDER    = 29;
-int FEEDER_NEW    = -1;
-int FEEDER_DNP    = 0;
+int MAX_FEEDER    		= 100;	//	Increased for additional tray feeders
+int FEEDER_NEW    		= -1;
+int FEEDER_DNP    		= 0; //This comes from eagle brd file
+int FEEDER_NO_MOUNT    	= 100; //This comes from spreadsheet
 
 string configFile  = filesetext(argv[0], ".cfg");
 
@@ -89,6 +98,7 @@ void configWrite(){
     printf("%d\n",   autodetectColumns);
     printf("%d\n",   flipHorizontal);
     printf("%s\n",   defaultFileLocation);
+    printf("%d\n",   useAutomaticOffset);
   }
 }
 
@@ -110,6 +120,7 @@ void configRead() {
       autodetectColumns  	= strtol(data[7]);
       flipHorizontal     	= strtol(data[8]);
       defaultFileLocation	= data[9];
+      useAutomaticOffset	= strtol(data[10]);
     }
   }
 }
@@ -127,7 +138,7 @@ void addFeederColum(string name, string value){
 }
 
 /** 
- * Parse feader list header names
+ * Parse feeder list header names
  */
 void parseRowsByHeader(){
   string columns[];
@@ -232,25 +243,91 @@ string getFeederParameter(int feeder, int col){
  * @return If of the feeder
  */
 int getFeederId(string name) {
-  for(int i = 0; i <= MAX_FEEDER; i++){
-    string fname   = getFeederParameter(i, COL_COMPNAME);
-    string falias  = getFeederParameter(i, COL_ALIAS); 
+  
+  name = strlwr(stringTrim(name)); //Make lower case and trim off any white space
 
-    //Check component name
-    if(strlwr(stringTrim(fname)) == strlwr(name)){
+  //Step through feeder spreadsheet. Stop before we get to MAX_FEEDER which should be the NoMount line
+  for(int i = 0; i <= MAX_FEEDER - 1; i++){
+    
+	string fname   = strlwr(stringTrim(getFeederParameter(i, COL_COMPNAME))); //Make lower case and trim off any white space
+	
+	//Issue 16. Skip the empty lines in the feeder spreadsheet that have no component name.
+	if(fname == "") continue;
+
+    //Hard compare: Does this part name match the component name from spreadsheet 
+    if(fname == name){
       return i;
     }
 
-    //Check aliases 
+	//Soft compare: Check if fname from spreadsheet is inside name of component
+	//This can lead to bad things. "2K-0603" will be found within "22K-0603" and a 2K will be mounted
+	//where a 22K should be.
+	//int pos = strstr(name, fname);
+	//if(pos != -1){ //Found!
+	//	return i;
+	//}
+
+  }
+
+  //We weren't able to locate this name in the component names so search aliases
+  for(i = 0; i <= MAX_FEEDER - 1; i++){
+    
+	//Make everything lower case and trim off any white space
+    string falias  = strlwr(stringTrim(getFeederParameter(i, COL_ALIAS)));
+
+    //Check to see if the name we are looking for is inside the aliases 
     string aliases[];
-    int cnt = strsplit(aliases, falias, ':');     
-    for(int k = 0; k < cnt; k++){
-      if(strlwr(stringTrim(aliases[k])) == strlwr(name)){
-        return i;
-      }
+    int cnt = strsplit(aliases, falias, ':'); //aliases[] is now loaded with separated list of aliases for this component
+    
+	for(int k = 0; k < cnt; k++){
+
+	  if(aliases[k] != "") //The strsplit above returns records with zero length, ignore them
+	  {
+		  //Hard compare: check if name of the component matches one of the aliases
+		  if(aliases[k] == name){
+			return i;
+		  }
+
+		  //Soft compare: check if name of the component is inside one of the aliases
+		  //int pos = strstr(name, aliases[k]);
+		  //This can lead to bad things. "2K-0603" will be found within "22K-0603" and a 2K will be mounted
+		  //where a 22K should be.
+		  //if(pos != -1){ //Found!
+			//return i;
+		  //}
+	  }
+
     }
   }
-  return -1;
+
+  //If we've gotten this far the name is not in component column or aliases. Soft compare the NoMount aliases against
+  //the name we are looking for.
+	
+  //Get aliases from the NoMount line (MAX_FEEDER is the last line of the spreadsheet)
+  string falias  = strlwr(stringTrim(getFeederParameter(MAX_FEEDER, COL_ALIAS)));
+
+  //Check to see if the name we are looking for is inside the aliases 
+  string aliases[];
+  int cnt = strsplit(aliases, falias, ':'); //aliases[] is now loaded with separated list of aliases for this component
+
+  for(int k = 0; k < cnt; k++){
+	//Check if this name is inside the alias list
+	if(aliases[k] != "") //The strsplit above returns records with zero length, ignore them
+	{
+	  //Hard compare: check if name of the component matches one of the aliases
+	  if(aliases[k] == name){
+		return MAX_FEEDER;
+	  }
+
+	  //Soft compare: check if name of the component is inside one of the aliases
+	  int pos = strstr(name, aliases[k]);
+	  if(pos != -1){ //Found!
+		return MAX_FEEDER;
+	  }
+	}
+  }
+
+  return -1; //Part not found in the feeder table
 }
 
 /**
@@ -259,7 +336,7 @@ int getFeederId(string name) {
  * @return Transformed X coordinate
  */
 int transformCoordinateX(int x, int pos){
-  //Pre default, use the automatically generated corrdinates
+  //Pre default, use the automatically generated coordinates
   int oX = minX;
   int wX = maxX;
 
@@ -290,7 +367,7 @@ int transformCoordinateX(int x, int pos){
  * @return Transformed X coordinate
  */
 int transformCoordinateY(int y, int pos){
-  //Pre default, use the automatically generated corrdinates
+  //Pre default, use the automatically generated coordinates
   int oY = minY;
   int wY = maxY;
 
@@ -343,13 +420,14 @@ void addFeeders(int position)
 
   int stackNumber = 0;
 
-  for(int i = 1; i <= MAX_FEEDER; i++){
+  //Stop at MAX_FEEDER-1 because feeder 30 is the "No Mount" feeder from the spreadsheet
+  for(int i = 1; i <= MAX_FEEDER - 1; i++){
     //Check if feeder is used
     int used = 0;
     for(int k = 0; k < pnpCount; k++){
       if(pnpPos[k] == position && pnpFeeder[k] == i){
         used = 1;
-        break;
+		break;
       }
     }
 
@@ -383,7 +461,7 @@ void addFeeders(int position)
              stackNumber, i, 
              getFeederParameter(i, COL_XOFFSET), getFeederParameter(i, COL_YOFFSET),
              getFeederParameter(i, COL_SPACING), getFeederParameter(i, COL_COMPNAME), 
-             getFeederParameter(i, COL_HEIGHT), getFeederParameter(i, COL_SPEED),mountValue, 
+             getFeederParameter(i, COL_HEIGHT), getFeederParameter(i, COL_SPEED), mountValue, 
              strtod(getFeederParameter(i, COL_WIDTH))*100, 
              strtod(getFeederParameter(i, COL_LENGTH))*100
       ); 
@@ -441,7 +519,7 @@ void addComponents(int position)
   int componentID = 1;
 
   for(int i = 0; i < pnpCount; i++){
-    if(pnpPos[i] == position && pnpFeeder[i] > 0){
+    if(pnpPos[i] == position && pnpFeeder[i] > 0 && pnpFeeder[i] != FEEDER_NO_MOUNT){
       //Most all Eagle FPs are correct but we have to subtract 90 because
       //the tapes are mounted 90 degrees from the board
       real convertedAngle = pnpAngle[i] - 90;
@@ -449,10 +527,20 @@ void addComponents(int position)
 	  real componentRotation = strtod(getFeederParameter(pnpFeeder[i], COL_RELTAPE));
 	  convertedAngle = convertedAngle + componentRotation;
 	  
-      if (convertedAngle > 180) convertedAngle -= 360;
+      if (convertedAngle > 180) convertedAngle -= 360; //CharmHigh machine expects rotation of -180 to 180
+      if (convertedAngle < -180) convertedAngle += 360; //CharmHigh machine expects rotation of -180 to 180
 
       int speed = strtol(getFeederParameter(pnpFeeder[i], COL_SPEED));
       if(speed == 100){speed = 0;}  //100% is value 0
+
+      //0b.0000.0ABC
+      //A = 1 = Use Vision
+      //A = 0 = No Vision
+      //B = 1 = Use Vacuum Detection
+      //B = 0 = No Vacuum Detection
+      //C = 1 = Skip placement
+      //C = 0 = Place this component
+      //Example: 3 = no place, vac, no vis
 
       int mountValue = 0;
       if(stringTrim(getFeederParameter(pnpFeeder[i], COL_PLACE)) == "N"){
@@ -485,12 +573,33 @@ void addComponents(int position)
 
 /**
  * Add any IC tray info
- * NOTE: Currently not implemented
+ *
+ * Very simple implementation.
+ *
+ * Tray info is from trays.txt in the ULP directory. It is copied from tray data input into SMTMAIN and copied from the resulting .dpv.
+ *
  */
 void addICTray()
 {
-  printf("\n");
-  printf("Table,No.,ID,CenterX,CenterY,IntervalX,IntervalY,NumX,NumY,Start\n");
+	if (simpleTray)
+	{
+		if(filesize(filedir(argv[0]) + trayFile)) //Check if file exists
+			{
+				string text;
+				int line = fileread(text, filedir(argv[0]) + trayFile); //	Copy everything from the trays file and insert into new .dpv.
+				printf("%s\n", text);
+			}
+			else
+			{
+				dlgMessageBox("!File trays.txt Not Found");
+			}
+	}
+	else
+	{
+		printf("\n");
+		printf("Table,No.,ID,CenterX,CenterY,IntervalX,IntervalY,NumX,NumY,Start\n");
+	}
+  
 }
 
 /**
@@ -674,8 +783,8 @@ void loadBoardInformation() {
 
       //If the part is SMD, process it
       if (isSmd) {
-    		real xCenter = (xmin + xmax) / 2;
-    		real yCenter = (ymin + ymax) / 2;
+		real xCenter = (xmin + xmax) / 2;
+   		real yCenter = (ymin + ymax) / 2;
 		
         pnpName[pnpCount]       = E.value + '-' + E.package.name;
         pnpDesignator[pnpCount] = E.name;
@@ -684,6 +793,8 @@ void loadBoardInformation() {
         pnpAngle[pnpCount]      = E.angle;
         pnpPos[pnpCount]        = isBottom;
 
+		//componentCount[]
+		
         //If we want to populate the device
         if(E.populate && E.attribute["POPULATE"] != "DNP"){
           pnpFeeder[pnpCount]   = getFeederId(pnpName[pnpCount]);
@@ -752,7 +863,9 @@ int showListOfDevices()
 {
   int selected = 0;
   int sorted = 0;
+  int sortedFeedersUsed = 1;
   int quantity = 1;
+  int xx=0;
   configRead();
   downloadFeederData();
 
@@ -769,12 +882,22 @@ int showListOfDevices()
     for(int i = 0; i < pnpCount; i++){
       partlist[i] = "";
       string feeder = "";
+
+  	  //Check the feeder spreadsheet to see if we should ignore this part (may be a fiducial)
+	  string noMountAlias = getFeederParameterByLine(29, COL_ALIAS);
+
       if(pnpFeeder[i] == FEEDER_NEW){
         feeder = "No feeder assigned!";
       } else if(pnpFeeder[i] == FEEDER_DNP){
-        feeder = "Do not mount!";
+        feeder = "No Mount";
+      } else if(pnpFeeder[i] == FEEDER_NO_MOUNT){
+        feeder = "No Mount";
       } else {
         sprintf(feeder, "%d", pnpFeeder[i]);
+		
+		//	Count number of times each component is used
+		xx=pnpFeeder[i];
+		componentCount[xx]++;
       }
 
       int tX = transformCoordinateX(pnpX[i], pnpPos[i]);
@@ -791,13 +914,61 @@ int showListOfDevices()
           pnpAngle[i], feeder
       );
     } 
-  
+	
+	//Generate Feeders Used list. Helpful for seeing what feeders we need to load or assign
+    string listOfUsedFeeders;
+	string usedFeederList[]; //Used in GUI
+	int usedFeederCount = 0;
+	xx=0;
+    for(i = 0; i < pnpCount; i++){
+      string feeder = "";
+      if(pnpFeeder[i] == FEEDER_NEW){
+        feeder = "None";
+      } else if(pnpFeeder[i] == FEEDER_DNP){
+        feeder = "Do not mount!";
+      } else {
+        sprintf(feeder, "%d", pnpFeeder[i]);
+      }
+
+	  //Ignore parts from record NoMount row
+	  if(pnpFeeder[i] != FEEDER_NO_MOUNT)
+	  {
+		//If this feeder is new, it doesn't have a nickname  
+		if(pnpFeeder[i] == FEEDER_NEW){
+		  //See if this feeder is already in the list
+		  if (strstr(listOfUsedFeeders, pnpName[i]) == -1)
+		  {
+			//Add this component name to the list of used feeders
+			listOfUsedFeeders += pnpName[i] + '\n';
+
+			//We don't have a feeder for this component so maintain its name
+			
+			sprintf(usedFeederList[usedFeederCount++], "%s\t%s\t", 
+			  feeder, pnpName[i]
+			);
+		  }
+		}
+		//Known feeder: See if this feeder's nickname is already in the list
+		else if (strstr(listOfUsedFeeders, getFeederParameter(pnpFeeder[i], COL_COMPNAME) ) == -1)
+		{
+		  //Add this component's nickname to the list of used feeders
+		  listOfUsedFeeders += getFeederParameter(pnpFeeder[i], COL_COMPNAME) + '\n';
+			
+		  //We have a nickname for this component from the spreadsheet so use it
+		  xx=pnpFeeder[i];	//	Count components
+		  sprintf(usedFeederList[usedFeederCount++], "%s\t%s\t%d\t", 
+		    feeder, getFeederParameter(pnpFeeder[i], COL_COMPNAME),componentCount[xx]
+		  );
+		}
+	  }
+    } 
+		
     //Display main dialog
     int dstatus = dlgDialog("Feeder configuration"){
       dlgHBoxLayout{
         dlgVBoxLayout dlgSpacing(800);
         dlgTabWidget {
-          dlgTabPage("Parts overview") {
+          dlgTabPage("Parts Overview") {
             dlgHBoxLayout {
               dlgListView("Designator\tComponent\tPosition\tBoard X\tPlacement X\tBoard Y\tPlacement Y\tAngle\tFeeder", partlist, selected, sorted);
               dlgVBoxLayout {
@@ -827,25 +998,28 @@ int showListOfDevices()
               }
             }
           }
-          dlgTabPage("Feeder config") {
+          dlgTabPage("Feeder Database") {
             dlgListView(availableFeederHeadline, availableFeederList, selected, sorted);
+          }
+          dlgTabPage("Feeders Used") {
+            dlgListView("Feeder Number\tPart Name\tComponent Count", usedFeederList, selected, sortedFeedersUsed);
           }
         }
         dlgVBoxLayout {
           dlgGroup("Feeder Config") {
             dlgRadioButton("Local CSV", feederListMode);
             dlgStringEdit(feederCSV); 
-            dlgRadioButton("Google spreadsheet", feederListMode);
+            dlgRadioButton("Google Spreadsheet", feederListMode);
             dlgStringEdit(feederListUrl); 
             dlgCheckBox("Autodetect columns", autodetectColumns);
-            dlgPushButton("Refresh feeder list") {
+            dlgPushButton("Refresh Feeder List") {
               downloadFeederData();
               dlgAccept();
             }
           }
           dlgGroup("Statistics") { 
             dlgHBoxLayout{ dlgLabel("Parts total:\t\t");         dlgLabel(itoa(pnpStatsPartsTotal)); }
-            dlgHBoxLayout{ dlgLabel("Parts ok:\t\t\t");          dlgLabel(itoa(pnpStatsPartsOk));    }
+            dlgHBoxLayout{ dlgLabel("Parts to mount:\t\t");      dlgLabel(itoa(pnpStatsPartsOk));    }
             dlgHBoxLayout{ dlgLabel("Parts not assigned:\t\t");  dlgLabel(itoa(pnpStatsPartsNew));   }
             dlgHBoxLayout{ dlgLabel("Parts not mounted:\t\t");   dlgLabel(itoa(pnpStatsPartsDnp));   }
           }
@@ -872,7 +1046,7 @@ int showListOfDevices()
       }
     };
 
-    //Write the cnfig file
+    //Write the config file
     configWrite();
 
     //If are done, abort
